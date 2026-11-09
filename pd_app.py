@@ -137,6 +137,7 @@ class Session:
     session_end_reason: str = ""
     saved_files: list[Path] = field(default_factory=list)
     upload_status: str = ""
+    needs_save: bool = False   # set on finish, done while the finish screen shows a spinner
 
 
 def S() -> Session:
@@ -234,8 +235,10 @@ def _inject_css() -> None:
     .stApp h1, .stApp h2, .stApp h3, .stApp h4 {{ font-family:{DISPLAY_FONT}; font-weight:400; }}
     .stApp {{ background:{_GRAIN}, {PAPER}; background-attachment:fixed; }}
     #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ visibility:hidden; }}
+    /* Streamlit's fixed top bar: empty here, but it covered the top of the page */
+    [data-testid="stHeader"] {{ display:none !important; }}
     .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp p, .stApp label {{ color:{INK}; }}
-    .block-container {{ padding-top:1.6rem; max-width:1000px; }}
+    .block-container, [data-testid="stMainBlockContainer"] {{ padding-top:3rem !important; max-width:1000px; }}
 
     @keyframes pd-deal  {{ from {{opacity:0; transform:translateY(8px) rotate(-.6deg)}} to {{opacity:1; transform:none}} }}
     @keyframes pd-stamp {{ 0% {{opacity:0; transform:scale(1.6) rotate(-14deg)}}
@@ -1080,8 +1083,19 @@ def _save_results() -> str | None:
 
 
 def _finish_session() -> None:
-    s = S()
+    """Switch to the finish screen at once; it saves (and uploads) while showing a spinner.
+
+    Saving still happens in this same script run, right after the click, so
+    nothing depends on the browser staying open - but the participant sees the
+    page change immediately instead of a frozen screen they might click again.
+    """
+    S().needs_save = True
     _go("finish")
+
+
+def _save_and_upload() -> None:
+    s = S()
+    s.needs_save = False
     stem = _save_results()
     if not stem:
         return
@@ -1126,6 +1140,11 @@ def _finish_screen(show_log: bool) -> None:
       <div style="font-size:.95rem;font-weight:600;color:{MUTED};margin-top:16px">{s.session_end_reason}</div>
     </div>""")
     st.write("")
+    if s.needs_save:
+        _, mid, _ = st.columns([1, 1, 1])
+        with mid, st.spinner("Saving your results... please keep this page open."):
+            _save_and_upload()
+        st.rerun()   # redraw without the spinner, with the download button / upload status
     # experimenter build only: grab this session's files straight from the browser
     files = [p for p in s.saved_files if p.exists()]
     if show_log and files:
