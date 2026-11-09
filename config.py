@@ -10,8 +10,6 @@ PAYOFF_MATRIX = {
 }
 ROUNDS_BY_CONDITION = {"honest": 10, "dishonest": 10, "unpredictable": 10}
 
-ZIP_PASSWORD = b"pd2025"
-
 # ── questionnaire ──────────────────────────────────────────────────────────────
 # LEGACY: TIPI-10 (Gosling et al. 2003), 1-7 scale. Kept for reference / future
 # reactivation — analyze_results.py can still read old *_tipi.csv exports.

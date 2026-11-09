@@ -27,18 +27,14 @@ from typing import Callable
 import streamlit as st
 import streamlit.components.v1 as components
 
+import remote_store
+
 from config import (
     STARTING_MONEY_EUR, UNPREDICTABLE_HONEST_PROB, PAYOFF_MATRIX,
-    ROUNDS_BY_CONDITION, ZIP_PASSWORD, BFI2S, BFI2S_DOMAINS, BFI2S_REVERSE,
+    ROUNDS_BY_CONDITION, BFI2S, BFI2S_DOMAINS, BFI2S_REVERSE,
     IMG_W, IMG_H, IMAGE_FILES,
     TEXT, SUBTEXT, OUTCOME_STYLE, BTN_STYLES, BTN_TEXT,
 )
-
-try:
-    import pyzipper
-    _HAS_ZIP = True
-except ImportError:
-    _HAS_ZIP = False
 
 try:
     from PIL import Image
@@ -139,7 +135,8 @@ class Session:
     demographics: dict = field(default_factory=dict)
     log: str = ""
     session_end_reason: str = ""
-    saved_zip: Path | None = None
+    saved_files: list[Path] = field(default_factory=list)
+    upload_status: str = ""
 
 
 def S() -> Session:
@@ -1094,25 +1091,23 @@ def _finish_session() -> None:
     files = [p for p in (d / f"{stem}.csv", d / f"{stem}_ratings.csv", d / f"{stem}_bfi.csv",
                          d / f"{stem}_demographics.csv", d / f"{stem}_summary.csv", log_path)
              if p.exists()]
-    zip_path = d / f"{stem}.zip"
-    try:
-        if _HAS_ZIP:
-            with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED,
-                                     encryption=pyzipper.WZ_AES) as zf:
-                zf.setpassword(ZIP_PASSWORD)
-                for p in files:
-                    zf.write(p, p.name)
-        else:
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for p in files:
-                    zf.write(p, p.name)
-            print(f"[results] pyzipper not available — wrote UNENCRYPTED zip: {zip_path}")
-        for p in files:
-            p.unlink()
-        s.saved_zip = zip_path
-    except Exception as e:
-        # never lose data to a packaging problem: keep the loose files
-        print(f"[results] WARNING: could not create zip ({e!r}); loose files kept in {d}")
+    # plain CSV files, no zipping/encryption in the web version (the data repo is private)
+    s.saved_files = files
+    _upload_results(files)
+
+
+def _upload_results(files: list[Path]) -> None:
+    """Hosted deployments: copy the results to the private GitHub data repo."""
+    s = S()
+    if not remote_store.configured():
+        s.upload_status = "Remote upload not configured (results kept on this server only)."
+        return
+    msgs = []
+    for p in files:
+        ok, msg = remote_store.upload(p, p.name, s.participant_id)
+        msgs.append(("OK " if ok else "FAILED ") + msg)
+        print(f"[results] {msgs[-1]}")
+    s.upload_status = "  \n".join(msgs)
 
 
 def _finish_screen(show_log: bool) -> None:
@@ -1131,12 +1126,21 @@ def _finish_screen(show_log: bool) -> None:
       <div style="font-size:.95rem;font-weight:600;color:{MUTED};margin-top:16px">{s.session_end_reason}</div>
     </div>""")
     st.write("")
-    # experimenter build only: grab the (encrypted) results zip straight from the browser
-    if show_log and s.saved_zip and s.saved_zip.exists():
+    # experimenter build only: grab this session's files straight from the browser
+    files = [p for p in s.saved_files if p.exists()]
+    if show_log and files:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:   # plain bundle, no password
+            for p in files:
+                zf.write(p, p.name)
         _, mid, _ = st.columns([1, 1, 1])
         with mid:
-            st.download_button("Download results zip", s.saved_zip.read_bytes(),
-                               file_name=s.saved_zip.name, mime="application/zip", width="stretch")
+            st.download_button("Download results", buf.getvalue(), file_name=f"{files[0].stem}.zip",
+                               mime="application/zip", width="stretch")
+    if show_log and s.upload_status:
+        _, mid, _ = st.columns([1, 2, 1])
+        with mid:
+            st.caption(s.upload_status)
 
 
 # ── main entry ─────────────────────────────────────────────────────────────────
