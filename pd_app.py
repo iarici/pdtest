@@ -48,6 +48,11 @@ RESULTS_ROOT = BASE_DIR / "results"
 
 PERSONALITY_PAGES = 3  # BFI-2-S: 30 items / 10 per page
 PID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")  # pid becomes a folder name — keep it path-safe
+# participant-made code: initials (2-4 letters) + last two digits of their phone number, e.g. MR47
+SELF_CODE_RE = re.compile(r"^[A-Za-z]{2,4}[0-9]{2}$")
+# pilot data collected with the desktop app: IDs found there count as taken
+PILOT_DATA_DIR = BASE_DIR.parent / "results" / "raw-data"
+_PILOT_NAME_RE = re.compile(r"^(.+)_\d{8}_\d{6}(\.zip)?$")
 
 
 # ── small helpers ──────────────────────────────────────────────────────────────
@@ -68,6 +73,51 @@ def expr_name(e: str) -> str:
 
 def valid_pid(pid: str) -> bool:
     return bool(PID_RE.match(pid))
+
+
+def valid_self_code(code: str) -> bool:
+    return bool(SELF_CODE_RE.match(code))
+
+
+def _pilot_ids() -> set[str]:
+    if not PILOT_DATA_DIR.is_dir():
+        return set()
+    return {m.group(1).upper() for p in PILOT_DATA_DIR.iterdir() if (m := _PILOT_NAME_RE.match(p.name))}
+
+
+def _try_claim(pid: str, taken: set[str]) -> bool:
+    """Reserve one candidate ID. The GitHub registry (shared by every server and
+    session) decides when it's configured; otherwise this server's results folder does."""
+    if pid in taken:
+        return False
+    if remote_store.configured():
+        status = remote_store.claim_id(pid)
+        if status == "created":
+            (RESULTS_ROOT / pid).mkdir(parents=True, exist_ok=True)
+            return True
+        if status == "exists":
+            return False
+        print(f"[id] could not reach the GitHub registry for {pid}; falling back to the local check")
+    try:
+        (RESULTS_ROOT / pid).mkdir(parents=True, exist_ok=False)   # atomic on this server
+        return True
+    except FileExistsError:
+        return False
+
+
+def claim_participant_id(requested: str) -> str:
+    """Return a unique ID: the requested one, or requested-2, -3, ... if it's already used.
+
+    IDs are upper-cased so MR47 and mr47 count as the same person.
+    """
+    base = requested.strip().upper()
+    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    taken = _pilot_ids()
+    for n in range(1, 1000):
+        cand = base if n == 1 else f"{base}-{n}"
+        if _try_claim(cand, taken):
+            return cand
+    raise RuntimeError(f"no free participant ID for {base}")
 
 
 def html(markup: str) -> None:
@@ -376,6 +426,20 @@ def _inject_css() -> None:
         background:{ACCENT}; color:#fff; border-color:{INK}; transform:translate(-1px,-1px); box-shadow:5px 5px 0 {INK}; }}
     [data-testid="stFormSubmitButton"] button:active {{ transform:translate(3px,3px); box-shadow:1px 1px 0 {INK}; }}
     [data-testid="stFormSubmitButton"] button p {{ font-family:{DISPLAY_FONT}; font-size:22px; color:#fff; }}
+    /* participant-ID sticker (demographics + finish screens) */
+    .pd-id {{ max-width:460px; margin:0 auto 22px; text-align:center; background:{MUSTARD}22;
+              border:2px dashed {INK}; border-radius:14px; padding:10px 18px 12px; }}
+    .pd-id-l {{ font-size:.8rem; font-weight:900; letter-spacing:.12em; text-transform:uppercase; color:{MUTED}; }}
+    .pd-id-v {{ font-family:{DISPLAY_FONT}; font-size:2.4rem; line-height:1.1; color:{INK}; letter-spacing:.06em; }}
+    .pd-id-note {{ font-size:.95rem; color:{INK}; margin:4px 0; }}
+    .pd-id-s {{ font-size:.88rem; font-weight:700; color:{MUTED}; }}
+    .pd-howto {{ background:{TINT}; border:2px solid {INK}; border-radius:14px; box-shadow:4px 4px 0 {INK};
+                 padding:14px 20px; margin:0 auto 20px; font-size:1.02rem; line-height:1.55; color:{INK}; }}
+    .pd-howto-t {{ font-family:{DISPLAY_FONT}; font-size:1.6rem; margin-bottom:4px; }}
+    .pd-howto-ex {{ display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap;
+                    margin:10px 0 6px; font-family:{DISPLAY_FONT}; font-size:1.5rem; }}
+    .pd-howto-ex span {{ background:#fff; border:2px solid {INK}; border-radius:8px; padding:0 10px; }}
+    .pd-howto-ex i {{ font-style:normal; color:{MUTED}; }}
     .pd-rule {{ border:none; border-top:2px dashed {INK}; opacity:.35; margin:2.3rem 0 1rem; }}
 
     /* End Session: small paper button, never louder than the game buttons */
@@ -415,10 +479,36 @@ def _bind_cd_keys() -> None:
 
 # ── flow entry points used by setup screens ────────────────────────────────────
 
-def start_demographics(pid: str, conditions: list[str], hide_condition: bool = False) -> None:
-    st.session_state.pending = {"pid": pid, "conditions": list(conditions),
-                                "hide_condition": hide_condition, "demographics": {}}
+def start_demographics(pid: str, conditions: list[str], hide_condition: bool = False,
+                       claim: bool = True) -> None:
+    """claim=True reserves a unique ID (adding -2, -3, ... on a clash).
+
+    Going Back and re-entering the same code reuses this session's reservation
+    instead of claiming a second one.
+    """
+    ss = st.session_state
+    requested = pid.strip().upper()
+    if not claim:
+        final = pid
+    elif ss.get("claimed_for") == requested:
+        final = ss.claimed_id
+    else:
+        final = claim_participant_id(requested)
+        ss.claimed_for, ss.claimed_id = requested, final
+    ss.pending = {"pid": final, "requested_pid": requested, "conditions": list(conditions),
+                  "hide_condition": hide_condition, "demographics": {}}
     _go("demographics")
+
+
+def _id_badge(pid: str, requested: str | None = None) -> str:
+    """Sticker showing the participant's ID; explains a -2/-3 suffix when one was added."""
+    note = ""
+    if requested and requested != pid:
+        note = (f"<div class='pd-id-note'><b>{requested}</b> was already taken by another participant, "
+                f"so your ID is <b>{pid}</b>.</div>")
+    return (f"<div class='pd-id'><div class='pd-id-l'>Your participant ID</div>"
+            f"<div class='pd-id-v'>{pid}</div>{note}"
+            f"<div class='pd-id-s'>Please write it down. You will need it if you want to withdraw your data.</div></div>")
 
 
 def back_to_setup() -> None:
@@ -430,9 +520,9 @@ def back_to_setup() -> None:
 def dev_jump(target: str) -> None:
     demo_conditions = list(ROUNDS_BY_CONDITION)
     if target == "demographics":
-        start_demographics("devtest", demo_conditions)
+        start_demographics("devtest", demo_conditions, claim=False)
     elif target == "consent":
-        start_demographics("devtest", demo_conditions)
+        start_demographics("devtest", demo_conditions, claim=False)
         _consent_nav(1, 1)
         _go("consent")
     elif target == "game":
@@ -621,6 +711,8 @@ def _end_session(reason: str, skip_personality: bool = False) -> None:
 def _demographics_screen() -> None:
     html("<h1 class='pd-h1'>A Few Quick Questions</h1>"
          "<p class='pd-sub'>Before we begin, please tell us a little about yourself.</p>")
+    p = st.session_state.pending
+    html(_id_badge(p["pid"], p.get("requested_pid")))
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         with st.form("demographics", border=True):
@@ -1139,6 +1231,7 @@ def _finish_screen(show_log: bool) -> None:
       </div>
       <div style="font-size:.95rem;font-weight:600;color:{MUTED};margin-top:16px">{s.session_end_reason}</div>
     </div>""")
+    html(_id_badge(s.participant_id))
     st.write("")
     if s.needs_save:
         _, mid, _ = st.columns([1, 1, 1])

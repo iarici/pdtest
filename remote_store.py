@@ -1,10 +1,12 @@
 """Copy finished results to a private GitHub repo (for hosted deployments).
 
 Hosted Streamlit servers have no persistent disk, so after a session is saved
-locally the results zip is also pushed to a separate, private data repo through
-the GitHub Contents API. Configure it in Streamlit secrets
-(`.streamlit/secrets.toml` locally, or the app's Settings -> Secrets on
-Streamlit Community Cloud):
+locally the result files are also pushed to a separate, private data repo
+through the GitHub Contents API. The same repo doubles as the registry of used
+participant IDs: claiming an ID creates <folder>/<ID>/_claimed.txt, and GitHub
+refuses to create a file that already exists, so two people can never end up
+with the same ID. Configure it in Streamlit secrets (`.streamlit/secrets.toml`
+locally, or the app's Settings -> Secrets on Streamlit Community Cloud):
 
     [github]
     token  = "github_pat_..."              # fine-grained token, Contents: read & write on the data repo only
@@ -19,12 +21,14 @@ from __future__ import annotations
 
 import base64
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
 import streamlit as st
 
 API = "https://api.github.com"
+CLAIM_FILE = "_claimed.txt"
 
 
 def _settings() -> dict | None:
@@ -41,19 +45,20 @@ def configured() -> bool:
     return _settings() is not None
 
 
-def upload(local: Path, remote_name: str, participant_id: str) -> tuple[bool, str]:
-    """Upload one file to <folder>/<participant_id>/<remote_name>. Returns (ok, message)."""
+def _create(rel_path: str, data: bytes, message: str) -> tuple[str, str]:
+    """Create <folder>/<rel_path>; never overwrites.
+
+    Returns (status, detail) with status "created", "exists" or "error".
+    """
     cfg = _settings()
     if cfg is None:
-        return False, "GitHub upload not configured"
-    folder = cfg.get("folder", "results").strip("/")
-    path = f"{folder}/{participant_id}/{remote_name}"
+        return "error", "GitHub upload not configured"
+    path = f"{cfg.get('folder', 'results').strip('/')}/{rel_path}"
     url = f"{API}/repos/{cfg['repo']}/contents/{path}"
     headers = {"Authorization": f"Bearer {cfg['token']}",
                "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28"}
-    body = {"message": f"Add results {participant_id}/{remote_name}",
-            "content": base64.b64encode(local.read_bytes()).decode(),
+    body = {"message": message, "content": base64.b64encode(data).decode(),
             "branch": cfg.get("branch", "main")}
 
     last = ""
@@ -61,14 +66,32 @@ def upload(local: Path, remote_name: str, participant_id: str) -> tuple[bool, st
         try:
             r = requests.put(url, json=body, headers=headers, timeout=20)
             if r.status_code in (200, 201):
-                return True, f"uploaded to {cfg['repo']}/{path}"
+                return "created", f"{cfg['repo']}/{path}"
             if r.status_code == 422 and "sha" in r.text:
-                # a file with this exact name already exists, never overwrite data
-                return False, f"{path} already exists in {cfg['repo']}"
+                return "exists", f"{cfg['repo']}/{path}"
             last = f"HTTP {r.status_code}: {r.text[:200]}"
             if r.status_code in (401, 403, 404):
                 break          # bad token / no access / wrong repo name: retrying won't help
         except requests.RequestException as e:
             last = repr(e)
         time.sleep(1.5 * (attempt + 1))
-    return False, f"upload failed ({last})"
+    return "error", last
+
+
+def upload(local: Path, remote_name: str, participant_id: str) -> tuple[bool, str]:
+    """Upload one file to <folder>/<participant_id>/<remote_name>. Returns (ok, message)."""
+    status, detail = _create(f"{participant_id}/{remote_name}", local.read_bytes(),
+                             f"Add results {participant_id}/{remote_name}")
+    if status == "created":
+        return True, f"uploaded to {detail}"
+    if status == "exists":
+        return False, f"{detail} already exists"     # never overwrite data
+    return False, f"upload failed ({detail})"
+
+
+def claim_id(participant_id: str) -> str:
+    """Reserve an ID in the data repo: "created" (it's yours), "exists" (taken) or "error"."""
+    stamp = datetime.now().isoformat(timespec="seconds")
+    status, _ = _create(f"{participant_id}/{CLAIM_FILE}", f"claimed {stamp}\n".encode(),
+                        f"Claim participant ID {participant_id}")
+    return status
