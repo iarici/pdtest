@@ -19,7 +19,7 @@ PILOT_HIDE_COND  = True   # hide condition name from participant
 
 
 def setup_screen() -> None:
-    pd_app.html("<div style='margin-top:12vh'></div>"
+    pd_app.html("<div style='margin-top:20vh'></div>"
                 "<h1 class='pd-center' style='font-size:2.6rem'>Face-Driven Decision Game</h1>"
                 "<p class='pd-sub' style='margin-bottom:2rem'>A decision-making experiment</p>")
     _, mid, _ = st.columns([1, 1.2, 1])
